@@ -1,0 +1,142 @@
+#!/bin/bash
+
+# This Bash script will set up an Ubuntu installation so that it will be able
+# to build SIMA.
+
+t=$(tempfile) || exit
+trap "rm -f -- '$t'" EXIT
+
+# We need this for dialogs
+#command -v dialog >/dev/null 2>&1 || { sudo apt-get install dialog }
+
+title="Ubuntu 12.04.3 - Bamboo SIMA Build Agent Setup"
+
+dialog --title "$title" --msgbox "Please note that this script will install as the current user, '$USER'!" 10 60
+
+# Obtain user input
+dialog --title "$title" --checklist "Setup options" 15 60 10 \
+	packages "Install packages" on \
+	utilities "Install Java, ANT and FOP" off \
+	adduser "Add bamboo user" off \
+	installagent "Install Bamboo agent" on \
+	testbuild "Run a test build" on 2>$t
+
+# Check for cancel
+if [ $? == 1 ] ; then
+	exit 0
+fi
+
+options=$(cat $t)
+
+if [[ "$options" =~ "packages" ]] ; then
+
+	# Configure keyboard (optional)
+	sudo apt-get install console-data
+	sudo dpkg-reconfigure console-data
+
+	# Make sure we use bash instead of dash as default shell
+	sudo dpkg-reconfigure dash
+
+	# Update the system
+	sudo apt-get update
+	sudo apt-get upgrade
+
+	# We're going to want these
+	sudo apt-get install joe
+	sudo apt-get install maven
+	sudo apt-get install git
+
+	# Required for testing
+	sudo apt-get install xvfb
+
+	# Only required for taking screenhots from testing
+	sudo apt-get install imagemagick
+	sudo apt-get install x11-apps
+fi
+
+#-----------------------------------------------------------------------------
+# Specific versions of the utilities below are required so we're going to
+# download and install these and place them before any other versions in the
+# path. "/usr/local/bin/" always preceeds "/usr/bin/"
+
+# Prepare a temporary folder
+mkdir ~/install-bamboo-tmp
+pushd ~/install-bamboo-tmp
+
+# Download and install Java
+if [ ! -d /usr/local/jdk1.7.0_45 ]; then
+	wget -nc http://resheim.net/update/jdk-7u45-linux-x64.tar.gz
+	sudo tar -xvzf jdk-7u45-linux-x64.tar.gz -C /usr/local
+	sudo ln -s /usr/local/jdk1.7.0_45/bin/* /usr/local/bin/
+	rm jdk-7u45-linux-x64.tar.gz
+fi
+
+# Apache Ant
+if [ ! -d /usr/local/apache-ant-1.9.2 ]; then
+	wget http://mirrors.gigenet.com/apache//ant/binaries/apache-ant-1.9.2-bin.tar.gz
+	sudo tar -xvzf apache-ant-1.9.2-bin.tar.gz -C /usr/local
+	sudo ln -s /usr/local/apache-ant-1.9.2/bin/ant /usr/local/bin/
+	rm apache-ant-1.9.2-bin.tar.gz
+fi
+
+# Apache FOP
+if [ ! -d /usr/local/fop-1.1 ]; then
+	wget -nc http://apache.uib.no/xmlgraphics/fop/binaries/fop-1.1-bin.tar.gz
+	sudo tar -xvzf fop-1.1-bin.tar.gz -C /usr/local
+	sudo ln -s /usr/local/fop-1.1/fop /usr/local/bin/
+	rm fop-1.1-bin.tar.gz
+fi
+
+popd
+
+if [[ "$options" =~ "installagent" ]] ; then
+	wget -nc http://torkild@bamboo.marintek.sintef.no/agentServer/agentInstaller/atlassian-bamboo-agent-installer-5.2.2.jar
+	sudo tee -a /etc/init/bamboo-agent.conf <<EOF
+# bamboo-agent - Continuous Integration tool
+#
+# Bamboo is a Continuous Integration tool.
+# Required-Start:
+# Required-Stop:
+description "Bamboo continuous integration agent"
+start on runlevel [2345]
+stop on runlevel [!2345]
+# Give up if restart occurs 10 times in 30 seconds.
+respawn limit 10 30
+chdir /home/$USER
+exec sudo -u $USER /usr/local/bin/java -jar atlassian-bamboo-agent-installer-5.2.2.jar http://bamboo.marintek.sintef.no/agentServer/
+respawn
+EOF
+fi
+
+# Perform a test build (optional)
+if [[ "$options" =~ "testbuild" ]] ; then
+	if [ ! -d ~/git ]; then
+		mkdir git
+	fi
+	pushd ~/git
+	if [ ! -d sima ]; then
+		git clone http://torkildr@stash.marintek.sintef.no/scm/sima/sima.git
+	fi
+	pushd sima/no.marintek.sima.build/build-scripts/
+	# Make sure we do not sign and verify
+	export bamboo.repository.branch.name="feature/"
+	# Start the build
+	ant -DbuildNumber=1 2>&1 | tee ~/sima-tescont-build.log
+	# Keep the artifacts so they can be used in the tests
+	if [ ! -d ~/git/artifacts ]; then
+		mkdir ~/git/artifacts
+	fi
+	mv work/*.zip ~/git/artifacts/
+	mv work/*.MD5 ~/git/artifacts/
+	mv work/*.epub ~/git/artifacts/
+	cp ~/test/* ~/git/artifacts/
+	export DISPLAY=:99
+	# If the test for some reason get stuck and you cannot see what is
+	# going on, you can execute the command below in another terminal. That
+	# will capture a screenshot and save it to a file named "capture.png"
+	#
+	# xwd -root -display :99 | convert xwd:- capture.png
+	ant -DbuildNumber=1 2>&1 test-features-from-artifact | tee ~/sima-test-test.log
+	cat work/testDir/eclipse/results/no.marintek.sima.test.AllTests.txt
+	popd
+fi
